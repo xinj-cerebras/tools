@@ -3,7 +3,7 @@
 
 Set the URL once (paste the debug-ui URL straight from the browser):
 
-    export GSV_URL='http://172.23.135.79:8300/debug-ui/fabric_view/?artifact_directory=...&chief_directory=...'
+    export GSV_URL='http://<host>:<port>/debug-ui/fabric_view/?artifact_directory=...&chief_directory=...'
 
 Then:
 
