@@ -36,6 +36,27 @@ gsv dfd commandType=memory_read memoryLocations=0x1000 rect=381,624,1,1 size=64
 Endpoints: `summary setting fabric_options routes kernel_tree kernel_annotation
 logical_view symbolmap annotation dfd pe_compile_info`.
 
+## Register names
+
+`gsv reg <pe> all` dumps what a PE has, but to look up a name before reading it,
+ask `ws_debug` for the arch's register table (name, address, width, count):
+
+```sh
+SIF=/cb/artifacts/builds/cbcore/latest-build-default/cbcore-0.0.0.sif
+singularity exec -e "$SIF" /cbcore/bin/ws_debug registers sdr   # or hbg / sbg
+```
+
+123 registers on SDR, 171 on HBG/SBG. `all` returns 113 of the SDR ones — the
+10 it omits are the DSR views (`ce_dst_dsr`, `ce_dst_1d_dsr`, `ce_dst_4d_dsr`,
+`ce_dst_circ_buf_dsr`, `ce_dst_fab_dsr`, and the `ce_s1_*` equivalents), which
+are alternate decodings of the same address range (0x7ec0 / 0x7e80). Name them
+explicitly to get the decoding you want:
+
+```sh
+gsv reg 381,624 ce_dst_dsr        # generic decode of 0x7ec0
+gsv reg 381,624 ce_dst_fab_dsr    # same bits, fabric-DSR field names
+```
+
 Why it exists: the directory query field differs per endpoint
 (`workDirectory` vs `chiefDirectory`) and getting it wrong returns a Python
 traceback; the register endpoint takes one register per request and silently
