@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""gsv - query a GSV debug-ui backend.
+
+Set the URL once (paste the debug-ui URL straight from the browser):
+
+    export GSV_URL='http://172.23.135.79:8300/debug-ui/fabric_view/?artifact_directory=...&chief_directory=...'
+
+Then:
+
+    gsv reg 381,624 ce_psr                    read registers on one PE
+    gsv reg 381,624 ce_psr ce_pcr ce_mt_ip    several registers
+    gsv reg 380,624,11,1 fab_switch_cfg       a PE rect (x,y,w,h)
+    gsv reg 381,624 all                       every register on that PE
+
+    gsv summary                               any endpoint, as JSON
+    gsv setting
+    gsv pe_compile_info peX=381 peY=624
+    gsv dfd commandType=memory_read memoryLocations=0x1000 rect=381,624,1,1 size=64
+
+Endpoints: summary setting fabric_options routes kernel_tree kernel_annotation
+           logical_view symbolmap annotation dfd pe_compile_info
+"""
+
+import json
+import os
+import re
+import sys
+from urllib.parse import parse_qs, urlparse
+
+import requests
+
+# endpoint -> (api path, directory field name)
+# The directory field is NOT the same across endpoints. That inconsistency is the
+# main reason this script exists; getting it wrong returns a Python traceback.
+EP = {
+    "summary":           ("gsv/summary/view",          "workDirectory"),
+    "setting":           ("gsv/ufv/setting",           "chiefDirectory"),
+    "fabric_options":    ("gsv/ufv/fabric_options",    "chiefDirectory"),
+    "routes":            ("gsv/ufv/routes",            "chiefDirectory"),
+    "kernel_tree":       ("gsv/ufv/kernel_tree",       "chiefDirectory"),
+    "kernel_annotation": ("gsv/ufv/kernel_annotation", "chiefDirectory"),
+    "logical_view":      ("gsv/ufv/logical_view",      "chiefDirectory"),
+    "symbolmap":         ("gsv/ufv/symbolmap",         "chiefDirectory"),
+    "annotation":        ("gsv/ufv/annotation",        "chiefDirectory"),
+    "dfd":               ("gsv/ufv/dfd",               "chiefDirectory"),
+    "pe_compile_info":   ("gsv/ufv/pe_compile_info",   "chiefDirectory"),
+}
+
+
+def call(endpoint, **params):
+    url = os.environ.get("GSV_URL")
+    if not url:
+        sys.exit("gsv: set GSV_URL to the debug-ui URL (see: gsv --help)")
+    u = urlparse(url)
+    q = {k: v[0] for k, v in parse_qs(u.query).items() if v and v[0]}
+    artifact = q.get("artifact_directory", "")
+    chief = q.get("chief_directory", "")
+
+    path, field = EP.get(endpoint, (endpoint, "chiefDirectory"))
+    params[field] = artifact if field != "chiefDirectory" else chief
+    if not params[field]:
+        sys.exit(f"gsv: {endpoint} needs {field}, which is not in GSV_URL")
+
+    r = requests.get(f"http://{u.netloc}/api/{path}", params=params, timeout=900)
+    try:
+        body = r.json()
+    except ValueError:
+        sys.exit(f"gsv: HTTP {r.status_code}, non-JSON body:\n{r.text[:300]}")
+
+    # Errors come back as a Python traceback in JSON; keep only the useful lines.
+    if r.status_code >= 400 or (isinstance(body, dict) and "traceback" in body):
+        tb = body.get("traceback", "") if isinstance(body, dict) else ""
+        hints = re.findall(r'has no field named "[^"]+"|Available Fields\(.*', tb)
+        if not hints:
+            lines = [ln.strip() for ln in tb.splitlines() if ln.strip()]
+            hints = lines[-1:] or [json.dumps(body)[:300]]
+        sys.exit("gsv: " + "\n     ".join(dict.fromkeys(hints)))
+    return body
+
+
+def show(body):
+    if isinstance(body, dict) and "dfd_read" in body:
+        print("\n".join(body["dfd_read"]))
+    else:
+        print(json.dumps(body, indent=2))
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        sys.exit(__doc__)
+    cmd, rest = argv[0], argv[1:]
+
+    if cmd == "reg":
+        if len(rest) < 2:
+            sys.exit("usage: gsv reg <x,y | x,y,w,h> <register> [register ...]")
+        rect = rest[0] if rest[0].count(",") == 3 else rest[0] + ",1,1"
+        for name in rest[1:]:
+            # The API takes ONE register per request. A comma-separated list
+            # returns [] with HTTP 200, so fan out here.
+            body = call("dfd", commandType="register_read",
+                        memoryLocations=name, rect=rect)
+            lines = body.get("dfd_read", []) if isinstance(body, dict) else body
+            if not lines:
+                print(f"gsv: {name}: nothing returned (unknown register?)",
+                      file=sys.stderr)
+            for line in lines:
+                print(line)
+        return
+
+    params = {}
+    for kv in rest:
+        k, _, v = kv.partition("=")
+        if not v:
+            sys.exit(f"gsv: bad param {kv!r}, expected key=value")
+        params[k] = v
+    show(call(cmd, **params))
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except requests.exceptions.RequestException as exc:
+        sys.exit(f"gsv: {exc}")
+    except KeyboardInterrupt:
+        sys.exit(130)
