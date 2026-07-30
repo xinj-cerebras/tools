@@ -7,11 +7,19 @@ lab/bringup host and on macOS.
 
 ```sh
 git clone <remote> ~/tools     # or: already at ~/tools on the lab host
-cd ~/tools && ./install.sh
-source ~/.zshrc                # macOS; on Linux: source ~/.bashrc.local
+cd ~/tools && ./install.sh     # on macOS: ./install-mac.sh
+source ~/.bashrc.local         # on macOS: source ~/.zshrc
 ```
 
-`install.sh` is idempotent — re-run it after adding a tool or pulling. It
+macOS has its own pair, `install-mac.sh` / `uninstall-mac.sh`, because
+Homebrew's python is PEP 668 "externally managed" and refuses
+`pip install --user`: the mac script puts the dependencies in a repo-local
+`.venv/` and generates wrappers in `bin/` that run the tools under it. Both
+`.venv/` and `bin/` stay inside the repo, and the wrappers locate the repo
+from their own path, so `tools/` can live anywhere.
+
+Either installer is idempotent — re-run it after adding a tool or pulling.
+`install.sh`:
 
 - symlinks every `<tool>/bin/*` entry point into `~/tools/bin/`,
 - prepends that directory to `PATH` via a marked block in your rc file
@@ -37,7 +45,8 @@ mytool/
 └── README.md
 ```
 
-Then `./install.sh` — the new entry point is picked up automatically. Anything
-under `<tool>/bin/` gets linked, so a tool can ship more than one command.
+Then re-run the installer — the new entry point is picked up automatically.
+Anything under `<tool>/bin/` gets linked, so a tool can ship more than one
+command.
 Keep entry points portable: `#!/usr/bin/env python3` / `#!/usr/bin/env bash`,
 no GNU-only flags (macOS ships BSD `sed`/`readlink` and bash 3.2).
