@@ -12,8 +12,8 @@
 
 set -eu
 
-BEGIN_MARK='# >>> tools (github: xinj/tools) >>>'
-END_MARK='# <<< tools (github: xinj/tools) <<<'
+BEGIN_MARK='# >>> tools (managed by ~/tools/install.sh) >>>'
+END_MARK='# <<< tools (managed by ~/tools/install.sh) <<<'
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 RC=""
