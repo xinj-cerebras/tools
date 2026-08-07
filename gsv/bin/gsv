@@ -5,6 +5,13 @@ Set the URL once (paste the debug-ui URL straight from the browser):
 
     export GSV_URL='http://<host>:<port>/debug-ui/fabric_view/?artifact_directory=...&chief_directory=...'
 
+GSV_URL is the only variable you need to set. The scheme is honored, http or https;
+the debug-viz hosts serve self-signed certs, so TLS certificate verification is
+always skipped.
+
+Timeouts: reads give up after 120s (GSV_TIMEOUT=<seconds>), connects after 4s per
+resolved address (GSV_CONNECT_TIMEOUT=<seconds>).
+
 Then:
 
     gsv reg 381,624 ce_psr                    read registers on one PE
@@ -25,9 +32,12 @@ import json
 import os
 import re
 import sys
+import threading
+from concurrent import futures
 from urllib.parse import parse_qs, urlparse
 
 import requests
+import urllib3
 
 # endpoint -> (api path, directory field name)
 # The directory field is NOT the same across endpoints. That inconsistency is the
@@ -47,6 +57,26 @@ EP = {
 }
 
 
+_local = threading.local()
+
+
+def session():
+    """One session per thread, reused across calls.
+
+    Reused so a multi-register read does not redo the TCP+TLS handshake each time;
+    per-thread because requests.Session is not guaranteed thread-safe and `reg`
+    fans out concurrently. No retries, so failures surface on the first attempt.
+    """
+    s = getattr(_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(max_retries=0)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        _local.session = s
+    return s
+
+
 def call(endpoint, **params):
     url = os.environ.get("GSV_URL")
     if not url:
@@ -61,7 +91,24 @@ def call(endpoint, **params):
     if not params[field]:
         sys.exit(f"gsv: {endpoint} needs {field}, which is not in GSV_URL")
 
-    r = requests.get(f"http://{u.netloc}/api/{path}", params=params, timeout=900)
+    # Keep the scheme from GSV_URL: the cloud debug-viz hosts are HTTPS-only and
+    # silently hang on port 80.
+    scheme = u.scheme or "http"
+    # Certificate verification is off, unconditionally. Every debug-viz host serves
+    # a self-signed cert, so verification never succeeds here - making it an opt-out
+    # only meant the tool broke whenever a shell was missing the env var.
+    verify = False
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    # Split connect from read: an unreachable host should fail in seconds, not sit
+    # there. Only the read side needs to be generous, since a wide rect or an
+    # "all" register dump genuinely takes a while.
+    # The connect budget is PER RESOLVED ADDRESS - urllib3 walks every getaddrinfo
+    # result within one attempt, and debug-viz has 3 A records - so the worst-case
+    # wait is roughly 3x this. Keep it small.
+    connect_timeout = float(os.environ.get("GSV_CONNECT_TIMEOUT", "4"))
+    read_timeout = float(os.environ.get("GSV_TIMEOUT", "120"))
+    r = session().get(f"{scheme}://{u.netloc}/api/{path}", params=params,
+                      timeout=(connect_timeout, read_timeout), verify=verify)
     try:
         body = r.json()
     except ValueError:
@@ -94,17 +141,26 @@ def main(argv):
         if len(rest) < 2:
             sys.exit("usage: gsv reg <x,y | x,y,w,h> <register> [register ...]")
         rect = rest[0] if rest[0].count(",") == 3 else rest[0] + ",1,1"
-        for name in rest[1:]:
+        names = rest[1:]
+
+        def read(name):
             # The API takes ONE register per request. A comma-separated list
             # returns [] with HTTP 200, so fan out here.
             body = call("dfd", commandType="register_read",
                         memoryLocations=name, rect=rect)
-            lines = body.get("dfd_read", []) if isinstance(body, dict) else body
-            if not lines:
-                print(f"gsv: {name}: nothing returned (unknown register?)",
-                      file=sys.stderr)
-            for line in lines:
-                print(line)
+            return body.get("dfd_read", []) if isinstance(body, dict) else body
+
+        # Each request costs several seconds server-side, so read concurrently -
+        # otherwise the wait is the sum, not the max. map() keeps output in the
+        # order the registers were asked for.
+        workers = min(len(names), 8)
+        with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for name, lines in zip(names, pool.map(read, names)):
+                if not lines:
+                    print(f"gsv: {name}: nothing returned (unknown register?)",
+                          file=sys.stderr)
+                for line in lines:
+                    print(line)
         return
 
     params = {}
@@ -119,6 +175,19 @@ def main(argv):
 if __name__ == "__main__":
     try:
         main(sys.argv[1:])
+    except requests.exceptions.SSLError as exc:
+        # Should not happen now that verification is off; if TLS still fails it is
+        # a real handshake problem, so show it rather than swallowing it.
+        sys.exit(f"gsv: TLS error: {exc}")
+    except requests.exceptions.ConnectTimeout:
+        sys.exit("gsv: timed out connecting. Check VPN, and that GSV_URL has the "
+                 "right scheme - https for the cloud debug-viz hosts")
+    except requests.exceptions.ConnectionError:
+        sys.exit("gsv: could not connect. Check VPN, and that the host and port "
+                 "in GSV_URL are right")
+    except requests.exceptions.ReadTimeout:
+        sys.exit("gsv: the server did not answer in time. Raise the limit with "
+                 "GSV_TIMEOUT=<seconds>")
     except requests.exceptions.RequestException as exc:
         sys.exit(f"gsv: {exc}")
     except KeyboardInterrupt:
