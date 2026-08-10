@@ -36,6 +36,38 @@ gsv dfd commandType=memory_read memoryLocations=0x1000 rect=381,624,1,1 size=64
 Endpoints: `summary setting fabric_options routes kernel_tree kernel_annotation
 logical_view symbolmap annotation dfd pe_compile_info`.
 
+## Running ws_debug on the same artifacts
+
+The paths the backend reads are already in the URL. `gsv path` unpacks them:
+
+```sh
+gsv path            # host, artifact dir, chief dir, and the files under it
+gsv path dfd        # one bare path, for substitution
+```
+
+`dfd` is `<chief>/dataless_ckpt.pb`, the dataless fabric dump the `dfd` endpoint
+reads — so `ws_debug read --dfd` sees the same register state as `gsv reg`:
+
+```sh
+ws_debug read --dfd "$(gsv path dfd)" --rect 381,624,1,1 -r ce_psr
+ws_debug read --dfd "$(gsv path dfd)" --pe 381,624 --all-registers
+```
+
+Inside the container:
+
+```sh
+SIF=/cb/artifacts/builds/cbcore/latest-build-default/cbcore-0.0.0.sif
+singularity exec -e "$SIF" /cbcore/bin/ws_debug read --dfd "$(gsv path dfd)" \
+    --rect 381,624,1,1 -r ce_psr
+```
+
+Caveat: those paths belong to the debug-ui host, and a lab host's `/cb` is its
+own local storage — the same path on shared EFS is a different filesystem. Run
+`gsv path` to see what is actually readable here; anything marked
+`(not on this host)` has to be copied over first (the `gsv-pull` skill does
+this). Deriving the chief directory needs one API call when the URL omits
+`chief_directory`; otherwise `gsv path` is offline.
+
 ## Register names
 
 `gsv reg <pe> all` dumps what a PE has, but to look up a name before reading it,

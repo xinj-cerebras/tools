@@ -26,6 +26,17 @@ Then:
 
 Endpoints: summary setting fabric_options routes kernel_tree kernel_annotation
            logical_view symbolmap annotation dfd pe_compile_info
+
+To run ws_debug against the same artifacts instead of going through the API,
+`gsv path` unpacks the directories out of GSV_URL:
+
+    gsv path                                  all of them, labeled
+    gsv path dfd                              one bare path, to substitute
+
+    ws_debug read --dfd "$(gsv path dfd)" --rect 381,624,1,1 -r ce_psr
+
+Those paths are on the debug-ui host. If it is not this machine, copy the files
+over first - `gsv path` marks what is not readable here.
 """
 
 import json
@@ -56,6 +67,16 @@ EP = {
     "pe_compile_info":   ("gsv/ufv/pe_compile_info",   "chiefDirectory"),
 }
 
+# Files inside the chief directory, for tools that read the artifacts directly
+# rather than over the API. The names are fixed by the service, which opens the
+# same files: dataless_ckpt.pb is what the dfd endpoint reads, so
+# `ws_debug read --dfd` and `gsv reg` see identical register state.
+CHIEF_FILES = {
+    "dfd":      "dataless_ckpt.pb",
+    "routes":   "stall_viz/routes.json.zst",
+    "settings": "stall_viz/ufv_settings.pb",
+}
+
 
 _local = threading.local()
 
@@ -77,17 +98,25 @@ def session():
     return s
 
 
-def call(endpoint, **params):
+def gsv_url():
+    """(parsed URL, query dict) from GSV_URL. Empty query values are dropped so
+    a `&chief_directory=` left behind by the UI counts as absent."""
     url = os.environ.get("GSV_URL")
     if not url:
         sys.exit("gsv: set GSV_URL to the debug-ui URL (see: gsv --help)")
     u = urlparse(url)
-    q = {k: v[0] for k, v in parse_qs(u.query).items() if v and v[0]}
+    return u, {k: v[0] for k, v in parse_qs(u.query).items() if v and v[0]}
+
+
+def call(endpoint, directory=None, /, **params):
+    # directory is positional-only: **params holds user-supplied query keys, and
+    # a future endpoint field literally named "directory" must not land here.
+    u, q = gsv_url()
     artifact = q.get("artifact_directory", "")
     chief = q.get("chief_directory", "")
 
     path, field = EP.get(endpoint, (endpoint, "chiefDirectory"))
-    params[field] = artifact if field != "chiefDirectory" else chief
+    params[field] = directory or (artifact if field != "chiefDirectory" else chief)
     if not params[field]:
         sys.exit(f"gsv: {endpoint} needs {field}, which is not in GSV_URL")
 
@@ -125,6 +154,48 @@ def call(endpoint, **params):
     return body
 
 
+def paths():
+    """The artifact locations behind GSV_URL, keyed the way `gsv path` names them."""
+    u, q = gsv_url()
+    artifact = q.get("artifact_directory", "")
+    chief = q.get("chief_directory", "")
+    if artifact and not chief:
+        # The UI leaves chief_directory out until a dump is picked in the
+        # selector; fabric_options is what fills that selector, and its first
+        # option is Chief. This is the one path lookup that needs the network.
+        body = call("fabric_options", directory=artifact)
+        opts = body.get("options", []) if isinstance(body, dict) else []
+        chief = opts[0].get("value", "") if opts else ""
+    out = {"artifact": artifact, "chief": chief}
+    out.update({k: f"{chief}/{v}" if chief else "" for k, v in CHIEF_FILES.items()})
+    return u, out
+
+
+def show_paths(keys):
+    u, p = paths()
+    if keys:
+        # One bare path per line, nothing else, so it can be substituted:
+        #   ws_debug read --dfd "$(gsv path dfd)" ...
+        for key in keys:
+            if key not in p:
+                sys.exit(f"gsv: no such path {key!r}; try: {' '.join(p)}")
+            if not p[key]:
+                sys.exit(f"gsv: {key} is unknown - GSV_URL has no "
+                         f"{'artifact_directory' if key == 'artifact' else 'chief directory'}")
+            print(p[key])
+        return
+
+    print(f"{'host':9} {u.netloc}")
+    for key, value in p.items():
+        if not value:
+            continue
+        # These paths belong to the debug-ui host, whose /cb is its own local
+        # storage - a lab box mounts a different filesystem at the same path.
+        # So say whether the file is here, rather than implying it is.
+        here = "" if os.path.exists(value) else "   (not on this host)"
+        print(f"{key:9} {value}{here}")
+
+
 def show(body):
     if isinstance(body, dict) and "dfd_read" in body:
         print("\n".join(body["dfd_read"]))
@@ -136,6 +207,10 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         sys.exit(__doc__)
     cmd, rest = argv[0], argv[1:]
+
+    if cmd == "path":
+        show_paths(rest)
+        return
 
     if cmd == "reg":
         if len(rest) < 2:

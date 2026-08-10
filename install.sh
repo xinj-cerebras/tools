@@ -109,10 +109,12 @@ strip_block
 {
     echo ""
     echo "$BEGIN_MARK"
-    echo "export TOOLS_HOME=\"$ROOT\""
+    # NB: not TOOLS_HOME -- monolith's cross-build makefiles use `TOOLS_HOME ?=`
+    # to locate the aarch64 buildroot SDK, so exporting it here hijacks them.
+    echo "export CB_TOOLS_HOME=\"$ROOT\""
     echo 'case ":$PATH:" in'
-    echo '    *":$TOOLS_HOME/bin:"*) ;;'
-    echo '    *) PATH="$TOOLS_HOME/bin:$PATH" ;;'
+    echo '    *":$CB_TOOLS_HOME/bin:"*) ;;'
+    echo '    *) PATH="$CB_TOOLS_HOME/bin:$PATH" ;;'
     echo 'esac'
     echo 'export PATH'
     echo "$END_MARK"
